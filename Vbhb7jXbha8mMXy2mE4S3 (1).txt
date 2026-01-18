@@ -1,0 +1,245 @@
+# utils/crypto.js
+<code>
+import crypto from "crypto";
+
+const algorithm = "aes-256-cbc";
+const key = crypto.randomBytes(32);
+const iv = crypto.randomBytes(16);
+
+export function encryptData(data) {
+  const cipher = crypto.createCipheriv(algorithm, key, iv);
+  let encrypted = cipher.update(data, "utf8", "hex");
+  encrypted += cipher.final("hex");
+  return { encrypted, iv: iv.toString("hex") };
+}
+
+export function decryptData(encrypted, ivHex) {
+  const decipher = crypto.createDecipheriv(algorithm, key, Buffer.from(ivHex, "hex"));
+  let decrypted = decipher.update(encrypted, "hex", "utf8");
+  decrypted += decipher.final("utf8");
+  return decrypted;
+}
+
+export function hashData(data) {
+  return crypto.createHash("sha256").update(data).digest("hex");
+}
+
+export function anonymizeData(obj) {
+  const anonymized = {};
+  for (const [k, v] of Object.entries(obj)) {
+    anonymized[k] = hashData(v);
+  }
+  return anonymized;
+}
+</code>
+
+---
+
+# utils/blockchain.js
+<code>
+import { ethers } from "ethers";
+
+const contractABI = [
+  "function shareRevenue(address user, uint amount) public returns (bool)"
+];
+
+const provider = new ethers.JsonRpcProvider("https://sepolia.infura.io/v3/YOUR_INFURA_KEY");
+const signer = new ethers.Wallet("YOUR_PRIVATE_KEY", provider);
+const contractAddress = "0xYourSmartContractAddress";
+const contract = new ethers.Contract(contractAddress, contractABI, signer);
+
+export async function shareRevenue(userAddress, amount) {
+  try {
+    const tx = await contract.shareRevenue(userAddress, ethers.parseEther(amount.toString()));
+    await tx.wait();
+    return { success: true, txHash: tx.hash };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+</code>
+
+---
+
+# pages/api/security.js
+<code>
+import { encryptData, anonymizeData } from "../../utils/crypto";
+
+let database = [];
+
+export default function handler(req, res) {
+  if (req.method === "POST") {
+    const { ownerType, data } = req.body; // enterprise, government, personal
+    const encrypted = encryptData(JSON.stringify(data));
+    const anonymized = ownerType === "personal" ? anonymizeData(data) : null;
+
+    const record = {
+      id: database.length + 1,
+      ownerType,
+      encrypted,
+      anonymized,
+      consent: false
+    };
+    database.push(record);
+
+    res.status(200).json({ message: "Data stored securely", id: record.id });
+  } else if (req.method === "GET") {
+    res.status(200).json(database);
+  } else {
+    res.status(405).json({ error: "Method not allowed" });
+  }
+}
+</code>
+
+---
+
+# pages/api/consent.js
+<code>
+let consentDB = {};
+
+export default function handler(req, res) {
+  if (req.method === "POST") {
+    const { userId, consent } = req.body;
+    consentDB[userId] = consent;
+    res.status(200).json({ message: "Consent updated", consent });
+  } else if (req.method === "GET") {
+    const { userId } = req.query;
+    res.status(200).json({ consent: consentDB[userId] || false });
+  } else {
+    res.status(405).json({ error: "Method not allowed" });
+  }
+}
+</code>
+
+---
+
+# pages/api/monetize.js
+<code>
+import { shareRevenue } from "../../utils/blockchain";
+
+let database = [];
+
+export default async function handler(req, res) {
+  if (req.method === "PUT") {
+    const { userId, userAddress } = req.body;
+    const user = database.find(u => u.id === userId);
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    if (user.consent) {
+      const result = await shareRevenue(userAddress, 0.05); // Example payout
+      res.status(200).json({ message: "Data monetized", result });
+    } else {
+      res.status(403).json({ error: "Consent not given" });
+    }
+  } else {
+    res.status(405).json({ error: "Method not allowed" });
+  }
+}
+</code>
+
+---
+
+# pages/index.js
+<code>
+import { useState } from "react";
+
+export default function Home() {
+  const [ownerType, setOwnerType] = useState("personal");
+  const [data, setData] = useState({});
+  const [userId, setUserId] = useState(null);
+  const [message, setMessage] = useState("");
+
+  const storeData = async () => {
+    const res = await fetch("/api/security", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ownerType, data })
+    });
+    const result = await res.json();
+    setUserId(result.id);
+    setMessage(result.message);
+  };
+
+  const giveConsent = async () => {
+    await fetch("/api/consent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId, consent: true })
+    });
+    setMessage("Consent given for monetization");
+  };
+
+  const monetize = async () => {
+    const res = await fetch("/api/monetize", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId, userAddress: "0xUserWalletAddress" })
+    });
+    const data = await res.json();
+    setMessage(data.message || data.error);
+  };
+
+  return (
+    <div style={{ padding: "20px" }}>
+      <h1>Privara: Data Security & Monetization</h1>
+      <select onChange={(e) => setOwnerType(e.target.value)}>
+        <option value="enterprise">Enterprise</option>
+        <option value="government">Government</option>
+        <option value="personal">Personal</option>
+      </select>
+      <textarea
+        placeholder="Enter data JSON"
+        onChange={(e) => setData(JSON.parse(e.target.value))}
+      />
+      <button onClick={storeData}>Store Securely</button>
+      <button onClick={giveConsent}>Give Consent</button>
+      <button onClick={monetize}>Monetize Data</button>
+      <p>{message}</p>
+    </div>
+  );
+}
+</code>
+
+---
+
+# contracts/Privara.sol
+<code>
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract Privara {
+    mapping(address => uint256) public balances;
+
+    event RevenueShared(address indexed user, uint256 amount);
+
+    function shareRevenue(address user, uint256 amount) public payable {
+        balances[user] += amount;
+        emit RevenueShared(user, amount);
+    }
+
+    function withdraw() public {
+        uint256 amount = balances[msg.sender];
+        require(amount > 0, "No balance");
+        balances[msg.sender] = 0;
+        payable(msg.sender).transfer(amount);
+    }
+
+    receive() external payable {}
+}
+</code>
+
+---
+
+# package.json
+<code>
+{
+  "name": "privara",
+  "version": "1.0.0",
+  "dependencies": {
+    "next": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "ethers": "latest"
+  }
+}
+</code>
